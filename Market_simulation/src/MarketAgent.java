@@ -19,24 +19,36 @@ import java.util.Map;
  */
 public class MarketAgent extends Agent {
     public int productsNum;
+    public int soFarProductNum;
     public double pRefuse;
     public long delayProduction;
+    public long valueOfProduct;
+    public long budget;
     public double orderMoreRate;
     public double orderMoreP;
     public Map<String, Integer> resources;
     public Map<String, Integer> rules;
+    public Map<String, Long> prices;
 
     protected void setup() {
         orderMoreP = 1;
         resources = new HashMap<>();
         rules = new HashMap<>();
+        prices = new HashMap<>();
         pRefuse = Double.parseDouble((String) this.getArguments()[0]);
-        delayProduction = Long.parseLong((String) this.getArguments()[1]);
-        orderMoreRate = Double.parseDouble((String) this.getArguments()[2]);
-        for (int i = 3, stop = this.getArguments().length; i < stop; i += 2) {
+        orderMoreRate = Double.parseDouble((String) this.getArguments()[1]);
+        valueOfProduct = Long.parseLong((String) this.getArguments()[2]);
+        budget = Long.parseLong((String) this.getArguments()[3]);
+        for (int i = 4, stop = this.getArguments().length; i < stop; i += 2) {
             rules.put((String) this.getArguments()[i], Integer.parseInt((String) this.getArguments()[i + 1]));
         }
 
+        try {
+            Thread.sleep(10000);
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+        delayProduction = valueOfProduct * 1;
         addBehaviours();
     }
 
@@ -67,6 +79,14 @@ public class MarketAgent extends Agent {
         }
         return enough;
     }
+
+    public long calculateAssetsValue(){
+        long assetsVal = 0;
+        for (Map.Entry<String, Integer> rule : rules.entrySet()) {
+            assetsVal += resources.getOrDefault(rule.getKey(), 0) * this.prices.get(rule.getKey());
+        }
+        return assetsVal;
+    }
 }
 
 abstract class MarketAgentsBehaviour extends CyclicBehaviour {
@@ -91,7 +111,9 @@ class ProduceAgent extends MarketAgentsBehaviour {
         if (agent.enoughResources()) {
             agent.createProduct();
             agent.productsNum++;
-            System.out.println(agent.getName() + ": I created a product. Now I have " + agent.productsNum + " products.");
+            agent.soFarProductNum++;
+            System.out.println(agent.getLocalName() + ": I created a product. So far created " + agent.soFarProductNum + ". " +
+                    "Now I have " + agent.productsNum + " products. Cash: "+agent.budget);
             try {
                 Thread.sleep(agent.delayProduction);
             } catch (InterruptedException e) {
@@ -106,24 +128,26 @@ class SellAgent extends MarketAgentsBehaviour {
 
     public SellAgent(MarketAgent a) {
         super(a);
-        mt = MessageTemplate.MatchPerformative(ACLMessage.PROPOSE);
+        mt = MessageTemplate.or(MessageTemplate.MatchPerformative(ACLMessage.PROPOSE), MessageTemplate.MatchPerformative(ACLMessage.INFORM_IF));
     }
 
     @Override
     public void action() {
         ACLMessage offer = agent.receive(mt);
         if (offer != null) {
-            // Offer received
             if (offer.getPerformative() == ACLMessage.PROPOSE) {
-                String text = offer.getSender().getName() + " asked me -" + agent.getName() + " for " + offer.getContent() + " products. ";
+                //wants to buy products
+                String text = offer.getSender().getLocalName() + " asked me -" + agent.getLocalName() + " for " + offer.getContent() + " products. ";
                 int neededResources = Integer.parseInt(offer.getContent());
                 ACLMessage reply = offer.createReply();
                 int soldProducts = Math.min(agent.productsNum, neededResources);
                 if (Math.random() > agent.pRefuse && soldProducts > 0) {
                     //accept offer
                     agent.productsNum -= soldProducts;
+                    agent.budget += soldProducts * agent.valueOfProduct;
                     reply.setPerformative(ACLMessage.ACCEPT_PROPOSAL);
                     text += "Products PROPOSAL_ACCEPTED. Selling " + soldProducts + " products.";
+                    //System.out.println("I sold something. " + agent.getLocalName() + " now I have: " + agent.budget);
                 } else {
                     //refuse offer
                     reply.setPerformative(ACLMessage.REJECT_PROPOSAL);
@@ -134,6 +158,15 @@ class SellAgent extends MarketAgentsBehaviour {
                 //System.out.println(text);
                 reply.setContent(String.valueOf(soldProducts));
                 agent.send(reply);
+            } else if (offer.getPerformative() == ACLMessage.INFORM_IF) {
+                //asked about my price
+                ACLMessage reply = offer.createReply();
+                reply.setPerformative(ACLMessage.INFORM);
+                System.out.println(offer.getSender().getLocalName() + " asked me -" + agent.getLocalName() + " about the price of my product");
+                reply.setContent(String.valueOf(agent.valueOfProduct));
+                agent.send(reply);
+            } else {
+                System.out.println("ERROR");
             }
         } else {
             block();
@@ -153,53 +186,84 @@ class BuyMarketAgent extends MarketAgentsBehaviour {
     public BuyMarketAgent(MarketAgent a, String buyFrom) {
         super(a);
         this.buyFrom = buyFrom;
-        this.conversationId = "trade:" + agent.getName() + "-" + buyFrom;
+        this.conversationId = "trade:" + agent.getLocalName() + "-" + buyFrom;
         this.messageTemplate = MessageTemplate.MatchConversationId(conversationId);
         delayBuying = 1;
+        step = 0;
     }
 
     @Override
     public void action() {
 
-        if (step == 0) {
-            //make an order
-            Integer missingAmount = Math.max(agent.rules.get(buyFrom) - agent.resources.getOrDefault(buyFrom, 0), 0);
-            if (missingAmount == 0) {
-                return;
-            }
-            Long willOrder = Math.round(missingAmount * agent.orderMoreP);
-            //System.out.println(agent.getName() + " ordering " + willOrder + " amount of product " + buyFrom + ".orderMoreP "
-            //        + agent.orderMoreP + ". I really need " + missingAmount);
-            ACLMessage msg = new ACLMessage(ACLMessage.PROPOSE);
-            msg.addReceiver(new AID(buyFrom, AID.ISLOCALNAME));
-            msg.setConversationId(conversationId);
-            msg.setContent(willOrder.toString());
-            agent.send(msg);
-            step++;
-        } else {
-            ACLMessage reply = agent.receive(messageTemplate);
-            if (reply != null) {
-                if (reply.getPerformative() == ACLMessage.ACCEPT_PROPOSAL) {
-                    int boughtAmount = Integer.parseInt(reply.getContent());
-                    int currentAmount = agent.resources.getOrDefault(buyFrom, 0);
-                    agent.resources.put(buyFrom, currentAmount + boughtAmount);
-                    agent.orderMoreP = Math.max(agent.orderMoreP - (agent.orderMoreRate * agent.orderMoreP) / 5, 1);
-                    delayBuying = 1;
-                    step = 0;
-                } else if (reply.getPerformative() == ACLMessage.REJECT_PROPOSAL) {
-                    //cryyy :(
-                    //double order at most
-                    agent.orderMoreP = Math.min(agent.orderMoreP + (agent.orderMoreRate * agent.orderMoreP), 2);
-                    //delayBuying *= 2;
-                    step = 0;
-                    block(delayBuying);
-                } else {
-                    System.out.println("ERROR!");
-                }
-            } else {
-                block();
-            }
+        if (step == 0 && agent.prices.containsKey(buyFrom)) {
+            step = 2;
         }
+        switch (step) {
+            case 0:
+                ACLMessage msg = new ACLMessage(ACLMessage.INFORM_IF);
+                msg.addReceiver(new AID(buyFrom, AID.ISLOCALNAME));
+                msg.setConversationId(conversationId);
+                agent.send(msg);
+                step++;
+                break;
+            case 1:
+                ACLMessage priceReply = agent.receive(messageTemplate);
+                if (priceReply != null) {
+                    if (priceReply.getPerformative() == ACLMessage.INFORM) {
+                        long price = Long.parseLong(priceReply.getContent());
+                        agent.prices.put(buyFrom, price);
+                        step++;
+                    }
+
+                } else {
+                    block();
+                }
+                break;
+            case 2:
+                //make an order
+                Integer missingAmount = Math.max(agent.rules.get(buyFrom) - agent.resources.getOrDefault(buyFrom, 0), 0);
+                if (missingAmount == 0) {
+                    return;
+                }
+                Long willOrder = Math.min(Math.round(missingAmount * agent.orderMoreP), agent.budget / agent.prices.get(buyFrom));
+                //System.out.println(agent.getLocalName() + " ordering " + willOrder + " amount of product " + buyFrom + ".orderMoreP "
+                //        + agent.orderMoreP + ". I really need " + missingAmount);
+                msg = new ACLMessage(ACLMessage.PROPOSE);
+                msg.addReceiver(new AID(buyFrom, AID.ISLOCALNAME));
+                msg.setConversationId(conversationId);
+                msg.setContent(willOrder.toString());
+                agent.send(msg);
+                step++;
+                break;
+            case 3:
+                ACLMessage reply = agent.receive(messageTemplate);
+                if (reply != null) {
+                    if (reply.getPerformative() == ACLMessage.ACCEPT_PROPOSAL) {
+                        int boughtAmount = Integer.parseInt(reply.getContent());
+                        int currentAmount = agent.resources.getOrDefault(buyFrom, 0);
+                        agent.resources.put(buyFrom, currentAmount + boughtAmount);
+                        agent.budget -= boughtAmount * agent.prices.get(buyFrom);
+                        agent.orderMoreP = Math.max(agent.orderMoreP - (agent.orderMoreRate * agent.orderMoreP) / 3, 1);
+                        delayBuying = 1;
+                        step = 0;
+                        // System.out.println("I bought something. " + agent.getLocalName() + " now I have: " + agent.budget);
+                    } else if (reply.getPerformative() == ACLMessage.REJECT_PROPOSAL) {
+                        //cryyy :(
+                        //double order at most
+                        agent.orderMoreP = Math.min(agent.orderMoreP + (agent.orderMoreRate * agent.orderMoreP), 1.5);
+                        //delayBuying *= 2;
+                        step = 0;
+                        block(delayBuying);
+                    } else {
+                        System.out.println("ERROR!");
+                    }
+                } else {
+                    block();
+                }
+                break;
+
+        }
+
     }
 
 }//end BuyMarketAgent
